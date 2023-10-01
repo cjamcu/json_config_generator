@@ -23,23 +23,22 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
     final className = element.displayName.replaceAll('\$', '');
     final environmentEnumName =
         annotation.read('environmentEnumName').stringValue;
-    final environments = annotation.read('environments').listValue;
-    throwIf(environments.isEmpty, 'environments could not be empty',
+    final environmentsList = annotation.read('environments').listValue;
+    throwIf(environmentsList.isEmpty, 'environments could not be empty',
         element: element);
-    final environmentMap = generateEnvironmentMap(environments, element);
-    final path = environmentMap.values.first;
+    final environments = generateEnvironmentList(environmentsList, element);
+    final path = environments.first.path;
     final Map<String, dynamic> config = await getConfigMap(path);
     if (environments.length == 1) {
       return mainClassGenerator(className, config, configFile: path);
     } else {
       throwIf(environmentEnumName.isEmpty,
-          'environemntEnumName could not be empty');
+          'environmentEnumName could not be empty');
       final environmentEnum =
-          environmentEnumGenerator(environmentEnumName, environmentMap);
+          environmentEnumGenerator(environmentEnumName, environments);
       return stringConverter(environmentEnum) +
           mainClassGenerator(className, config,
-              environmentName: environmentEnumName,
-              environmentMap: environmentMap);
+              environmentName: environmentEnumName, environments: environments);
     }
   }
 
@@ -51,66 +50,85 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
     return map;
   }
 
-  Map<String, String> generateEnvironmentMap(
+  List<Environment> generateEnvironmentList(
       List<DartObject> environments, Element element) {
-    final map = Map<String, String>();
+    final list = List<Environment>.empty(growable: true);
+
     environments.forEach((env) {
       final name = env.getField('name')?.toStringValue();
-      throwIf(name == null || name.trim().isEmpty,
-          'name could not be  empty in $env',
-          element: element);
       final path = env.getField('path')?.toStringValue();
+      final dotEnvPath = env.getField('dotEnvPath')?.toStringValue() ?? '';
+      final isEnvFile = dotEnvPath.split('/').last.split('.').last == 'env';
+
+      throwIf(name == null || name.trim().isEmpty,
+          'name could not be empty in $env',
+          element: element);
+
       throwIf(path == null || path.trim().isEmpty,
           'path could not be empty in $env',
           element: element);
+
       throwIf(
-          map.containsKey(name),
+          list.any((element) => element.name == name),
           'every environment need to have distinct name. '
           '$name was already used',
           element: element);
+
       final fileName = path!.split('/').last;
+
       throwIf(!fileName.contains('.json'),
           'environment file "$fileName" must have extension ".json"',
           element: element);
-      map[name!] = path;
+
+      if (dotEnvPath.isNotEmpty) {
+        throwIf(!isEnvFile,
+            'environment file "$dotEnvPath" must have extension ".env"',
+            element: element);
+      }
+
+      list.add(Environment(name: name!, path: path, dotEnvPath: dotEnvPath));
     });
-    return map;
+    return list;
   }
 
-  Enum environmentEnumGenerator(String enumName, Map<String, String> map) {
+  Enum environmentEnumGenerator(
+      String enumName, List<Environment> environments) {
     final builder = EnumBuilder()
       ..name = enumName
-      ..values =
-          ListBuilder(map.keys.map((e) => EnumValue((v) => v..name = e)));
+      ..values = ListBuilder(
+        environments.map((env) => EnumValue((v) => v..name = env.name)),
+      );
     return builder.build();
   }
 
-  String mainClassGenerator(String name, Map<String, dynamic> config,
-      {String? environmentName,
-      Map<String, String>? environmentMap,
-      String? configFile}) {
+  String mainClassGenerator(
+    String name,
+    Map<String, dynamic> config, {
+    String? environmentName,
+    String? configFile,
+    List<Environment>? environments,
+  }) {
     String initMethodBody = '';
     if (configFile != null) {
-      initMethodBody +=
-          '''
+      initMethodBody += '''
       final jsonString = await rootBundle.loadString('$configFile');
       final ${name.camelCase} = json.decode(jsonString) as Map<String, dynamic>;
     ''';
     } else {
-      initMethodBody =
-          '''
+      initMethodBody = '''
       String path = '';
+      String dotEnvPath = '';
       switch(${environmentName!.camelCase}){
     ''';
-      environmentMap!.entries.forEach((entry) => initMethodBody +=
-          '''
-      case ${environmentName}.${entry.key}:
-        path = '${entry.value}';
+      environments!.forEach((entry) => initMethodBody += '''
+      case ${environmentName}.${entry.name}:
+        path = '${entry.path}';
+        dotEnvPath = '${entry.dotEnvPath}';
         break;
     ''');
-      initMethodBody +=
-          '''
+      initMethodBody += '''
       }
+      await dotenv.load(fileName: dotEnvPath);
       final jsonString = await rootBundle.loadString(path);
       final ${name.camelCase} = json.decode(jsonString) as Map<String, dynamic>;
     ''';
@@ -119,7 +137,11 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
     String subClasses = '';
     config.forEach((key, value) {
       final type = getType(key, value);
-      if (value is Map) {
+      if (value is String && value.startsWith('\${') && value.endsWith('}')) {
+        final envKey = value.replaceAll('\${', '').replaceAll('}', '');
+        initMethodBody +=
+            ''' ${key.camelCase} = dotenv.env[\'${envKey}\'] as $type; ''';
+      } else if (value is Map) {
         subClasses += subClassesGenerator(key, value);
         initMethodBody +=
             '${key.camelCase}= _${key.pascalCase}.fromJson(${name.camelCase}[\'${key.snakeCase}\'] as Map<String,dynamic>);';
@@ -136,6 +158,8 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
             '${key.camelCase}= ${name.camelCase}[\'${key.snakeCase}\'] as $type;';
       }
     });
+
+    initMethodBody += 'return this;';
     final mainClass = Class(
       (c) => c
         ..name = name
@@ -165,13 +189,13 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
               ..name = 'init'
               ..modifier = MethodModifier.async
               ..requiredParameters = ListBuilder([
-                if (environmentName != null && environmentMap != null)
+                if (environmentName != null && environments != null)
                   Parameter((p) => p
                     ..name = environmentName.camelCase
                     ..type = refer(environmentName))
               ])
               ..body = Code(initMethodBody)
-              ..returns = refer('Future<void>'))
+              ..returns = refer('Future<$name>'))
           ],
         ),
     );

@@ -230,6 +230,11 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
         final castType = type.replaceAll('List', '');
         factoryCode +=
             '${key.camelCase}= (${name.camelCase}[\'${key.snakeCase}\'] as List).cast$castType();';
+      } else if (value is String &&
+          value.startsWith('\${') &&
+          value.endsWith('}')) {
+        final envKey = value.replaceAll('\${', '').replaceAll('}', '');
+        factoryCode += '${key.camelCase}:dotenv.env[\'${envKey}\'] as $type,';
       } else {
         factoryCode +=
             '${key.camelCase}: ${name.camelCase}[\'${key.snakeCase}\'] as $type,';

@@ -29,6 +29,16 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
     final environments = generateEnvironmentList(environmentsList, element);
     final path = environments.first.path;
     final Map<String, dynamic> config = await getConfigMap(path);
+
+    final hasDotEnv =
+        (environments ?? []).any((element) => element.dotEnvPath != '');
+
+    final hasEnvVar = config.values.any((element) => isEnvVariable(element));
+
+    throwIf(!hasDotEnv && hasEnvVar,
+        'you need to add dotEnvPath to your environments for using env variables like "\${MY_ENV_VAR}" in your json config file',
+        element: null);
+
     if (environments.length == 1) {
       return mainClassGenerator(className, config, configFile: path);
     } else {
@@ -112,16 +122,6 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
     final hasDotEnv =
         (environments ?? []).any((element) => element.dotEnvPath != '');
 
-    final hasEnvVar = config.values.any((element) =>
-        element is String &&
-        element.startsWith('\${') &&
-        element.endsWith('}'));
-
-    throwIf(!hasDotEnv && hasEnvVar,
-        'you need to add dotEnvPath to your environments for using env variables like "\${MY_ENV_VAR}" in your json config file',
-        element: null);
-
-
     if (configFile != null) {
       initMethodBody += '''
       final jsonString = await rootBundle.loadString('$configFile');
@@ -167,8 +167,8 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
     String subClasses = '';
     config.forEach((key, value) {
       final type = getType(key, value);
-      if (value is String && value.startsWith('\${') && value.endsWith('}')) {
-        final envKey = value.replaceAll('\${', '').replaceAll('}', '');
+      if (isEnvVariable(value)) {
+        final envKey = getEnvKey(value);
         initMethodBody +=
             ''' ${key.camelCase} = dotenv.env[\'${envKey}\'] as $type; ''';
       } else if (value is Map) {
@@ -260,10 +260,8 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
         final castType = type.replaceAll('List', '');
         factoryCode +=
             '${key.camelCase}= (${name.camelCase}[\'${key.snakeCase}\'] as List).cast$castType();';
-      } else if (value is String &&
-          value.startsWith('\${') &&
-          value.endsWith('}')) {
-        final envKey = value.replaceAll('\${', '').replaceAll('}', '');
+      } else if (isEnvVariable(value)) {
+        final envKey = getEnvKey(value);
         factoryCode += '${key.camelCase}:dotenv.env[\'${envKey}\'] as $type,';
       } else {
         factoryCode +=
@@ -352,4 +350,14 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
     final emitter = DartEmitter(useNullSafetySyntax: true);
     return DartFormatter().format(obj.accept(emitter).toString());
   }
+
+  // Check if element is an environment variable like "{MY_ENV_VAR}"
+  bool isEnvVariable(dynamic element) {
+    return element is String &&
+        element.startsWith('\${') &&
+        element.endsWith('}');
+  }
+
+  // Get the environment variable name from element
+  getEnvKey(value) => value.replaceAll('\${', '').replaceAll('}', '');
 }

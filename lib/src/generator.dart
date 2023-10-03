@@ -109,12 +109,25 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
     List<Environment>? environments,
   }) {
     String initMethodBody = '';
+    final hasDotEnv =
+        (environments ?? []).any((element) => element.dotEnvPath != '');
+
+    final hasEnvVar = config.values.any((element) =>
+        element is String &&
+        element.startsWith('\${') &&
+        element.endsWith('}'));
+
+    throwIf(!hasDotEnv && hasEnvVar,
+        'you need to add dotEnvPath to your environments for using env variables like "\${MY_ENV_VAR}" in your json config file',
+        element: null);
+
+
     if (configFile != null) {
       initMethodBody += '''
       final jsonString = await rootBundle.loadString('$configFile');
       final ${name.camelCase} = json.decode(jsonString) as Map<String, dynamic>;
     ''';
-    } else {
+    } else if (hasDotEnv) {
       initMethodBody = '''
       String path = '';
       String dotEnvPath = '';
@@ -129,6 +142,23 @@ class JsonConfigGenerator extends GeneratorForAnnotation<Configuration> {
       initMethodBody += '''
       }
       await dotenv.load(fileName: dotEnvPath);
+      final jsonString = await rootBundle.loadString(path);
+      final ${name.camelCase} = json.decode(jsonString) as Map<String, dynamic>;
+    ''';
+    } else {
+      initMethodBody = '''
+      String path = '';
+
+      switch(${environmentName!.camelCase}){
+    ''';
+      environments!.forEach((entry) => initMethodBody += '''
+      case ${environmentName}.${entry.name}:
+        path = '${entry.path}';
+        break;
+    ''');
+      initMethodBody += '''
+      }
+   
       final jsonString = await rootBundle.loadString(path);
       final ${name.camelCase} = json.decode(jsonString) as Map<String, dynamic>;
     ''';
